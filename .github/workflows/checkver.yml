@@ -1,0 +1,74 @@
+name: Check Versions
+
+on:
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checkver:
+    name: Check for stale manifests
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out bucket
+        uses: actions/checkout@v4
+
+      - name: Install Scoop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {
+            Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+            Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+          }
+
+          $scoopShims = Join-Path $env:USERPROFILE 'scoop\shims'
+          $scoop = Join-Path $scoopShims 'scoop.ps1'
+          if (-not (Test-Path $scoop)) {
+            throw "Scoop shim was not found at $scoop"
+          }
+
+          $scoopShims | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $scoop --version
+
+      - name: Run Scoop autoupdate check
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $checkver = Join-Path (scoop prefix scoop) 'bin\checkver.ps1'
+          $checkverOutput = & $checkver -Dir "$env:GITHUB_WORKSPACE\bucket" -Update -ThrowError *>&1
+          $checkverOutput | ForEach-Object { Write-Host $_ }
+
+          $failurePatterns = @(
+            "couldn't find",
+            "couldn't match",
+            'is not valid',
+            'checkver expects',
+            "'replace' requires"
+          )
+          $failedChecks = $checkverOutput | Where-Object {
+            $line = $_.ToString()
+            $failurePatterns | Where-Object { $line.Contains($_) }
+          }
+
+          if ($failedChecks) {
+            throw 'Scoop checkver could not check one or more manifests.'
+          }
+
+      - name: Fail if manifests changed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          git diff -- bucket
+
+          $changes = git status --porcelain -- bucket
+          if ($changes) {
+            throw 'One or more Scoop manifests are stale. Run checkver.ps1 -Update locally and commit the updated manifest.'
+          }

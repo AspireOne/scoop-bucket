@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  codex-manage:
+    name: Validate codex-manage manifest
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out bucket
+        uses: actions/checkout@v4
+
+      - name: Install Scoop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {
+            Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+            Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+          }
+
+          scoop --version
+
+      - name: Validate manifest JSON
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $manifestPath = Join-Path $env:GITHUB_WORKSPACE 'bucket/codex-manage.json'
+          $manifest = Get-Content -Raw $manifestPath | ConvertFrom-Json
+
+          foreach ($property in 'version', 'description', 'homepage', 'license', 'architecture', 'bin', 'checkver') {
+            if (-not $manifest.PSObject.Properties.Name.Contains($property)) {
+              throw "bucket/codex-manage.json is missing required property '$property'"
+            }
+          }
+
+          foreach ($arch in '64bit', 'arm64') {
+            $entry = $manifest.architecture.$arch
+            if (-not $entry.url -or -not $entry.hash) {
+              throw "bucket/codex-manage.json is missing url/hash for '$arch'"
+            }
+          }
+
+      - name: Validate with Scoop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          scoop info "$env:GITHUB_WORKSPACE\bucket\codex-manage.json"
+          scoop download "$env:GITHUB_WORKSPACE\bucket\codex-manage.json" --force --no-update-scoop
+
+      - name: Test local install
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          scoop install "$env:GITHUB_WORKSPACE\bucket\codex-manage.json" --no-cache --no-update-scoop
+
+          $command = Get-Command codex-manage -ErrorAction Stop
+          if (-not (Test-Path $command.Source)) {
+            throw "codex-manage shim was not created"
+          }
+
+          $installDir = scoop prefix codex-manage
+          if (-not (Test-Path (Join-Path $installDir 'codex-manage.exe'))) {
+            throw "codex-manage.exe was not installed"
+          }
+
+      - name: Uninstall
+        if: always()
+        shell: pwsh
+        run: |
+          if (Get-Command scoop -ErrorAction SilentlyContinue) {
+            scoop uninstall codex-manage
+          }

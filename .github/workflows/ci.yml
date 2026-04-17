@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  codex-manage:
-    name: Validate codex-manage manifest
+  manifests:
+    name: Validate manifests
     runs-on: windows-latest
 
     steps:
@@ -41,19 +41,58 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $manifestPath = Join-Path $env:GITHUB_WORKSPACE 'bucket/codex-manage.json'
-          $manifest = Get-Content -Raw $manifestPath | ConvertFrom-Json
+          $manifestPaths = Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE 'bucket') -Filter '*.json'
+          if (-not $manifestPaths) {
+            throw 'No Scoop manifests found in bucket/'
+          }
 
-          foreach ($property in 'version', 'description', 'homepage', 'license', 'architecture', 'bin', 'checkver') {
-            if (-not $manifest.PSObject.Properties.Name.Contains($property)) {
-              throw "bucket/codex-manage.json is missing required property '$property'"
+          foreach ($manifestPath in $manifestPaths) {
+            $relativePath = Resolve-Path -Path $manifestPath.FullName -Relative
+            $manifest = Get-Content -Raw $manifestPath.FullName | ConvertFrom-Json
+
+            foreach ($property in 'version', 'description', 'homepage', 'license') {
+              if (-not $manifest.PSObject.Properties.Name.Contains($property)) {
+                throw "$relativePath is missing required property '$property'"
+              }
+            }
+
+            if ($manifest.PSObject.Properties.Name.Contains('architecture')) {
+              if (@($manifest.architecture.PSObject.Properties).Count -eq 0) {
+                throw "$relativePath has an empty architecture object"
+              }
+
+              foreach ($arch in $manifest.architecture.PSObject.Properties) {
+                if (-not $arch.Value.url -or -not $arch.Value.hash) {
+                  throw "$relativePath is missing url/hash for '$($arch.Name)'"
+                }
+              }
+            } elseif (-not $manifest.url -or -not $manifest.hash) {
+              throw "$relativePath is missing top-level url/hash"
             }
           }
 
-          foreach ($arch in '64bit', 'arm64') {
-            $entry = $manifest.architecture.$arch
-            if (-not $entry.url -or -not $entry.hash) {
-              throw "bucket/codex-manage.json is missing url/hash for '$arch'"
+      - name: Validate manifest bin entries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          Get-ChildItem -Path "$env:GITHUB_WORKSPACE\bucket" -Filter '*.json' | ForEach-Object {
+            $manifest = Get-Content -Raw $_.FullName | ConvertFrom-Json
+
+            if ($manifest.PSObject.Properties.Name.Contains('bin')) {
+              $binEntries = @($manifest.bin)
+
+              foreach ($binEntry in $binEntries) {
+                if ($binEntry -is [string]) {
+                  continue
+                }
+
+                if ($binEntry -is [array] -and $binEntry.Count -gt 0 -and $binEntry[0] -is [string]) {
+                  continue
+                }
+
+                throw "$($_.Name) has an unsupported bin entry: $($binEntry | ConvertTo-Json -Compress)"
+              }
             }
           }
 
@@ -62,24 +101,64 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          scoop info "$env:GITHUB_WORKSPACE\bucket\codex-manage.json"
-          scoop download "$env:GITHUB_WORKSPACE\bucket\codex-manage.json" --force --no-update-scoop
+          Get-ChildItem -Path "$env:GITHUB_WORKSPACE\bucket" -Filter '*.json' | ForEach-Object {
+            $manifest = Get-Content -Raw $_.FullName | ConvertFrom-Json
+            scoop info $_.FullName
+
+            if ($manifest.PSObject.Properties.Name.Contains('architecture')) {
+              foreach ($arch in $manifest.architecture.PSObject.Properties.Name) {
+                scoop download $_.FullName --arch $arch --force --no-update-scoop
+              }
+            } else {
+              scoop download $_.FullName --force --no-update-scoop
+            }
+          }
 
       - name: Test local install
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          scoop install "$env:GITHUB_WORKSPACE\bucket\codex-manage.json" --no-cache --no-update-scoop
+          Get-ChildItem -Path "$env:GITHUB_WORKSPACE\bucket" -Filter '*.json' | ForEach-Object {
+            $appName = $_.BaseName
+            $manifest = Get-Content -Raw $_.FullName | ConvertFrom-Json
 
-          $command = Get-Command codex-manage -ErrorAction Stop
-          if (-not (Test-Path $command.Source)) {
-            throw "codex-manage shim was not created"
-          }
+            scoop install $_.FullName --no-cache --no-update-scoop
 
-          $installDir = scoop prefix codex-manage
-          if (-not (Test-Path (Join-Path $installDir 'codex-manage.exe'))) {
-            throw "codex-manage.exe was not installed"
+            $installDir = scoop prefix $appName
+            if (-not (Test-Path $installDir)) {
+              throw "$appName install directory was not created"
+            }
+
+            if ($manifest.PSObject.Properties.Name.Contains('bin')) {
+              $binEntries = @($manifest.bin)
+              foreach ($binEntry in $binEntries) {
+                if ($binEntry -is [string]) {
+                  $binaryPath = $binEntry
+                  $commandName = [System.IO.Path]::GetFileNameWithoutExtension((Split-Path -Leaf $binaryPath))
+                } else {
+                  $binaryPath = $binEntry[0]
+                  $commandName = if ($binEntry.Count -gt 1) {
+                    [System.IO.Path]::GetFileNameWithoutExtension($binEntry[1])
+                  } else {
+                    [System.IO.Path]::GetFileNameWithoutExtension((Split-Path -Leaf $binaryPath))
+                  }
+                }
+
+                $shimDir = Join-Path $env:USERPROFILE 'scoop\shims'
+                $shimPath = @('.exe', '.cmd', '.ps1') |
+                  ForEach-Object { Join-Path $shimDir "$commandName$_" } |
+                  Where-Object { Test-Path $_ } |
+                  Select-Object -First 1
+                if (-not $shimPath) {
+                  throw "$commandName shim was not created"
+                }
+
+                if (-not (Test-Path (Join-Path $installDir $binaryPath))) {
+                  throw "$binaryPath was not installed"
+                }
+              }
+            }
           }
 
       - name: Uninstall
@@ -87,5 +166,10 @@ jobs:
         shell: pwsh
         run: |
           if (Get-Command scoop -ErrorAction SilentlyContinue) {
-            scoop uninstall codex-manage
+            Get-ChildItem -Path "$env:GITHUB_WORKSPACE\bucket" -Filter '*.json' | ForEach-Object {
+              scoop prefix $_.BaseName *> $null
+              if ($LASTEXITCODE -eq 0) {
+                scoop uninstall $_.BaseName
+              }
+            }
           }

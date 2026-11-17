@@ -23,4 +23,7 @@ jobs:
 
       - name: Check versions
         shell: pwsh
+        env:
+          # Scoop uses the GitHub API when a token is available.
+          GH_TOKEN: ${{ github.token }}
         run: ./scripts/check-versions.ps1

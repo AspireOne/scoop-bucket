@@ -1,16 +1,16 @@
 {
-  "version": "1.9.1",
+  "version": "1.9.2",
   "description": "Terminal UI for switching between Codex auth profiles",
   "homepage": "https://github.com/AspireOne/codex-auth-manager",
   "license": "GPL-3.0-only",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/AspireOne/codex-auth-manager/releases/download/v1.9.1/codex-manage_1.9.1_windows_amd64.zip",
-      "hash": "8375a38e6782bcebe3cc6ac819fb1eee5bc80a9cfebe08773fc70497e6880e2e"
+      "url": "https://github.com/AspireOne/codex-auth-manager/releases/download/v1.9.2/codex-manage_1.9.2_windows_amd64.zip",
+      "hash": "09f7416296dc0c27a0ef57bbe361c365de99712e3d14e176f9190cc5bb9667e8"
     },
     "arm64": {
-      "url": "https://github.com/AspireOne/codex-auth-manager/releases/download/v1.9.1/codex-manage_1.9.1_windows_arm64.zip",
-      "hash": "85f5bd9063c73af38a4844356b9a26319ac46693d526bfe8a476da35abb79d74"
+      "url": "https://github.com/AspireOne/codex-auth-manager/releases/download/v1.9.2/codex-manage_1.9.2_windows_arm64.zip",
+      "hash": "9b17e94067f6b78de9020f72219ffdbb2a2826bacc811870fccf8bcf274d646c"
     }
   },
   "bin": "codex-manage.exe",

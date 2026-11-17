@@ -1,0 +1,39 @@
+name: Set up Scoop
+description: Install Scoop and expose its shims to subsequent steps.
+
+outputs:
+  root:
+    description: Scoop's installation directory, containing schema.json.
+    value: ${{ steps.scoop.outputs.root }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Scoop
+      id: scoop
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+
+        if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {
+          Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+          Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+        }
+
+        $scoopShims = Join-Path $env:USERPROFILE 'scoop\shims'
+        $scoop = Join-Path $scoopShims 'scoop.ps1'
+        if (-not (Test-Path $scoop)) {
+          throw "Scoop shim was not found at $scoop"
+        }
+
+        $scoopShims | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        & $scoop --version
+        if ($LASTEXITCODE -ne 0) {
+          throw 'Scoop did not start successfully.'
+        }
+
+        $root = & $scoop prefix scoop
+        if ($LASTEXITCODE -ne 0) {
+          throw 'Could not locate Scoop.'
+        }
+        "root=$root" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append

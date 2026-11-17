@@ -12,87 +12,49 @@ jobs:
   manifests:
     name: Validate manifests
     runs-on: windows-latest
+    timeout-minutes: 20
 
     steps:
       - name: Check out bucket
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Install Scoop
+      - name: Set up Scoop
+        id: scoop
+        uses: ./.github/actions/setup-scoop
+
+      - name: Test version checking
         shell: pwsh
+        run: ./scripts/tests/check-versions.ps1
+
+      - name: Validate manifest schema
+        shell: pwsh
+        env:
+          SCOOP_ROOT: ${{ steps.scoop.outputs.root }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {
-            Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
-            Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
-          }
-
-          $scoopShims = Join-Path $env:USERPROFILE 'scoop\shims'
-          $scoop = Join-Path $scoopShims 'scoop.ps1'
-          if (-not (Test-Path $scoop)) {
-            throw "Scoop shim was not found at $scoop"
-          }
-
-          $scoopShims | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          & $scoop --version
-
-      - name: Validate manifest JSON
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $manifestPaths = Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE 'bucket') -Filter '*.json'
-          if (-not $manifestPaths) {
+          $manifestPaths = @(Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE 'bucket') -Filter '*.json' -File)
+          if ($manifestPaths.Count -eq 0) {
             throw 'No Scoop manifests found in bucket/'
           }
 
           foreach ($manifestPath in $manifestPaths) {
-            $relativePath = Resolve-Path -Path $manifestPath.FullName -Relative
-            $manifest = Get-Content -Raw $manifestPath.FullName | ConvertFrom-Json
-
-            foreach ($property in 'version', 'description', 'homepage', 'license') {
-              if (-not $manifest.PSObject.Properties.Name.Contains($property)) {
-                throw "$relativePath is missing required property '$property'"
-              }
+            $json = Get-Content -Raw $manifestPath.FullName
+            Write-Host "Validating $($manifestPath.Name)"
+            if (-not (Test-Json -Json $json -SchemaFile (Join-Path $env:SCOOP_ROOT 'schema.json'))) {
+              throw "$($manifestPath.Name) does not match Scoop's manifest schema."
             }
 
-            if ($manifest.PSObject.Properties.Name.Contains('architecture')) {
-              if (@($manifest.architecture.PSObject.Properties).Count -eq 0) {
-                throw "$relativePath has an empty architecture object"
-              }
-
+            # The schema does not require a URL and hash for every architecture.
+            $manifest = $json | ConvertFrom-Json
+            if ($manifest.architecture) {
               foreach ($arch in $manifest.architecture.PSObject.Properties) {
-                if (-not $arch.Value.url -or -not $arch.Value.hash) {
-                  throw "$relativePath is missing url/hash for '$($arch.Name)'"
+                if (-not ($arch.Value.url -or $manifest.url) -or -not ($arch.Value.hash -or $manifest.hash)) {
+                  throw "$($manifestPath.Name) is missing a URL or hash for '$($arch.Name)'."
                 }
               }
-            } elseif (-not $manifest.url -or -not $manifest.hash) {
-              throw "$relativePath is missing top-level url/hash"
-            }
-          }
-
-      - name: Validate manifest bin entries
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          Get-ChildItem -Path "$env:GITHUB_WORKSPACE\bucket" -Filter '*.json' | ForEach-Object {
-            $manifest = Get-Content -Raw $_.FullName | ConvertFrom-Json
-
-            if ($manifest.PSObject.Properties.Name.Contains('bin')) {
-              $binEntries = @($manifest.bin)
-
-              foreach ($binEntry in $binEntries) {
-                if ($binEntry -is [string]) {
-                  continue
-                }
-
-                if ($binEntry -is [array] -and $binEntry.Count -gt 0 -and $binEntry[0] -is [string]) {
-                  continue
-                }
-
-                throw "$($_.Name) has an unsupported bin entry: $($binEntry | ConvertTo-Json -Compress)"
-              }
+            } elseif (-not $manifest.hash) {
+              throw "$($manifestPath.Name) is missing a hash."
             }
           }
 
@@ -104,13 +66,22 @@ jobs:
           Get-ChildItem -Path "$env:GITHUB_WORKSPACE\bucket" -Filter '*.json' | ForEach-Object {
             $manifest = Get-Content -Raw $_.FullName | ConvertFrom-Json
             scoop info $_.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not read Scoop information for $($_.Name)."
+            }
 
             if ($manifest.PSObject.Properties.Name.Contains('architecture')) {
               foreach ($arch in $manifest.architecture.PSObject.Properties.Name) {
                 scoop download $_.FullName --arch $arch --force --no-update-scoop
+                if ($LASTEXITCODE -ne 0) {
+                  throw "Download or hash verification failed for $($_.Name) [$arch]."
+                }
               }
             } else {
               scoop download $_.FullName --force --no-update-scoop
+              if ($LASTEXITCODE -ne 0) {
+                throw "Download or hash verification failed for $($_.Name)."
+              }
             }
           }
 
@@ -124,9 +95,12 @@ jobs:
             $manifest = Get-Content -Raw $_.FullName | ConvertFrom-Json
 
             scoop install $_.FullName --no-cache --no-update-scoop
+            if ($LASTEXITCODE -ne 0) {
+              throw "Installation failed for $appName."
+            }
 
             $installDir = scoop prefix $appName
-            if (-not (Test-Path $installDir)) {
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path $installDir)) {
               throw "$appName install directory was not created"
             }
 
@@ -161,15 +135,35 @@ jobs:
             }
           }
 
+      - name: Test codex-manage version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $manifest = Get-Content -Raw ./bucket/codex-manage.json | ConvertFrom-Json
+          $version = codex-manage --version
+          if ($LASTEXITCODE -ne 0) {
+            throw 'codex-manage --version failed.'
+          }
+          if ($version -cne "v$($manifest.version)") {
+            throw "Expected codex-manage v$($manifest.version), got '$version'."
+          }
+          Write-Host "codex-manage started successfully: $version"
+
       - name: Uninstall
         if: always()
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+
           if (Get-Command scoop -ErrorAction SilentlyContinue) {
             Get-ChildItem -Path "$env:GITHUB_WORKSPACE\bucket" -Filter '*.json' | ForEach-Object {
-              scoop prefix $_.BaseName *> $null
-              if ($LASTEXITCODE -eq 0) {
+              $installDir = Join-Path $env:USERPROFILE "scoop\apps\$($_.BaseName)"
+              if (Test-Path $installDir) {
                 scoop uninstall $_.BaseName
+                if ($LASTEXITCODE -ne 0) {
+                  throw "Uninstall failed for $($_.BaseName)."
+                }
               }
             }
           }

@@ -1,0 +1,127 @@
+name: Update manifest
+run-name: Update ${{ inputs.app || github.event.client_payload.app }} to ${{ inputs.version || github.event.client_payload.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: Existing app name, for example codex-manage
+        required: true
+        type: string
+      version:
+        description: Published stable release tag, for example v1.9.2
+        required: true
+        type: string
+  repository_dispatch:
+    types: [update-manifest]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-manifest
+  queue: max
+
+env:
+  APP: ${{ inputs.app || github.event.client_payload.app }}
+  VERSION: ${{ inputs.version || github.event.client_payload.version }}
+
+jobs:
+  prepare:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    outputs:
+      ref: ${{ steps.update.outputs.ref }}
+      changed: ${{ steps.update.outputs.changed }}
+
+    steps:
+      - name: Check out bucket
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - name: Reject outdated CI definitions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Relative reusable workflows come from the run's original commit.
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          if ! git diff --quiet "$GITHUB_SHA" HEAD -- .github/workflows/ci.yml; then
+            echo "::error::CI changed since this run was created. Send a fresh update request instead of rerunning this workflow."
+            exit 1
+          fi
+
+      - name: Set up Scoop
+        uses: ./.github/actions/setup-scoop
+
+      - name: Prepare manifest update
+        id: update
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          ./scripts/update-manifest.ps1 -App $env:APP -Version $env:VERSION
+          $ref = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not resolve the candidate base commit.'
+          }
+          "ref=$ref" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+          $path = "bucket/$($env:APP).json"
+          git diff --quiet -- $path
+          if ($LASTEXITCODE -eq 0) {
+            'changed=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } elseif ($LASTEXITCODE -eq 1) {
+            'changed=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            git diff -- $path
+          } else {
+            throw 'Could not compare the candidate manifest.'
+          }
+
+      - name: Upload candidate manifest
+        uses: actions/upload-artifact@v7
+        with:
+          name: manifest-update
+          path: bucket/${{ env.APP }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  validate:
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.prepare.outputs.ref }}
+      manifest-artifact: manifest-update
+
+  publish:
+    needs: [prepare, validate]
+    if: needs.prepare.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out tested commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+
+      - name: Download tested manifest
+        uses: actions/download-artifact@v8
+        with:
+          name: manifest-update
+          path: bucket
+
+      - name: Publish tested manifest
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- "bucket/$APP.json"
+          git commit -m "chore(manifest): update $APP to $VERSION"
+          git push origin HEAD:main

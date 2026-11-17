@@ -4,6 +4,16 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to test
+        required: true
+        type: string
+      manifest-artifact:
+        description: Candidate manifest from the calling workflow
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -17,14 +27,25 @@ jobs:
     steps:
       - name: Check out bucket
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Download candidate manifest
+        if: inputs.manifest-artifact != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.manifest-artifact }}
+          path: bucket
 
       - name: Set up Scoop
         id: scoop
         uses: ./.github/actions/setup-scoop
 
-      - name: Test version checking
+      - name: Test maintenance scripts
         shell: pwsh
-        run: ./scripts/tests/check-versions.ps1
+        run: |
+          ./scripts/tests/check-versions.ps1
+          ./scripts/tests/update-manifest.ps1
 
       - name: Validate manifest schema
         shell: pwsh
